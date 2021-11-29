@@ -29,11 +29,10 @@ hyperparametre_defaults = dict(
     epochs = 100,
     train_split = 0.99,
     batch_size = 4,
-    epochs = 100
 )
 
-# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
-run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
+run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
+# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
 config = wandb.config
 
 np2tens = lambda x: torch.tensor(x)
@@ -42,7 +41,6 @@ print("Setting up constants.")
 ACTOR_LR = config.actor_lr
 CRITIC_LR = config.critic_lr
 MAX_LENGTH = config.max_length
-EPOCHS = config.epochs
 TRAIN_SPLIT = config.train_split
 BATCH_SIZE = config.batch_size
 EPOCHS = config.epochs
@@ -104,9 +102,10 @@ critic_optim = AdamW(critic_model.parameters(), lr=CRITIC_LR)
 print("Starting to train.")
 max_token = len(bart_tokenizer)-1
 
-for _ in range(EPOCHS):
+for ep in range(EPOCHS):
+    print(f"Training epoch {ep}")
 
-    for i, batch in tqdm(enumerate(data_train_batches)):
+    for i, batch in tqdm(enumerate(data_train_batches), total=len(data_train_batches)):
 
         # Generate the noise to input to the model
         input_sentences = []
