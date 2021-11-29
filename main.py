@@ -85,7 +85,7 @@ class Critic(nn.Module):
         x = self.flatten(x)
         x = F.relu(self.d4(x))
         x = F.relu(self.d5(x))
-        x = F.relu(self.d6(x))
+        x = F.sigmoid(self.d6(x))
         return x
 
 critic_model = Critic(len(bart_tokenizer))
@@ -141,7 +141,7 @@ for ep in range(EPOCHS):
         logits_string = [re.sub("<s>", "", i.split("</s>")[0]) for i in logits_string]
 
         # Calculate critic outputs
-        critic_output_model = critic_model(model_sentences_padded_expanded)
+        critic_output_model = critic_model(F.softmax(model_sentences_padded_expanded, dim=2))
         critic_output_target = critic_model(target_sentence_padded_expanded)
 
         critic_loss = -(critic_output_target-critic_output_model).mean()
@@ -149,13 +149,6 @@ for ep in range(EPOCHS):
 
         # Backprop the loss. Gogogo!
         loss = critic_loss+model_loss
-        loss.backward()
-
-        actor_optim.step()
-        critic_optim.step()
-
-        actor_optim.zero_grad()
-        critic_optim.zero_grad()
 
         # Log some stuff
         if i % 10 == 0:
@@ -164,3 +157,10 @@ for ep in range(EPOCHS):
                     "loss": loss.item(),
                     "sample": wandb.Html(logits_string[0])})
 
+        loss.backward()
+
+        actor_optim.step()
+        critic_optim.step()
+
+        actor_optim.zero_grad()
+        critic_optim.zero_grad()
