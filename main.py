@@ -23,8 +23,8 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 1e-5,
-    critic_lr = 1e-3,
+    actor_lr = 1e-6,
+    critic_lr = 1e-5,
     max_length = 50,
     epochs = 100,
     train_split = 0.99,
