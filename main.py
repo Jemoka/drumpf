@@ -23,8 +23,8 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 1e-6,
-    critic_lr = 1e-5,
+    actor_lr = 5e-5, 
+    critic_lr = 1e-6,
     max_length = 50,
     epochs = 100,
     train_split = 0.99,
@@ -70,22 +70,22 @@ class Critic(nn.Module):
     def __init__(self, vocab_size):
         super(Critic,self).__init__()
 
-        self.d1 = nn.Linear(vocab_size, 2048)
-        self.d2 = nn.Linear(2048, 1024)
-        self.d3 = nn.Linear(1024, 128)
+        self.d1 = nn.Linear(vocab_size, 64)
+        self.d2 = nn.Linear(64, 32)
         self.flatten = nn.Flatten()
-        self.d4 = nn.Linear(6400, 1024)
-        self.d5 = nn.Linear(1024, 64)
-        self.d6 = nn.Linear(64, 1)
+        self.d3 = nn.Linear(1600, 128)
+        self.d4 = nn.Linear(128, 64)
+        self.d5 = nn.Linear(64, 32)
+        self.d6 = nn.Linear(32, 1)
 
     def forward(self,x):
         x = F.relu(self.d1(x))
         x = F.relu(self.d2(x))
-        x = F.relu(self.d3(x))
         x = self.flatten(x)
+        x = F.relu(self.d3(x))
         x = F.relu(self.d4(x))
         x = F.relu(self.d5(x))
-        x = F.sigmoid(self.d6(x))
+        x = self.d6(x)
         return x
 
 critic_model = Critic(len(bart_tokenizer))
@@ -105,7 +105,8 @@ max_token = len(bart_tokenizer)-1
 for ep in range(EPOCHS):
     print(f"Training epoch {ep}")
 
-    for i, batch in tqdm(enumerate(data_train_batches), total=len(data_train_batches)):
+    bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
+    for i, batch in bar:
 
         # Generate the noise to input to the model
         input_sentences = []
@@ -144,23 +145,37 @@ for ep in range(EPOCHS):
         critic_output_model = critic_model(F.softmax(model_sentences_padded_expanded, dim=2))
         critic_output_target = critic_model(target_sentence_padded_expanded)
 
-        critic_loss = -(critic_output_target-critic_output_model).mean()
-        model_loss = (1-critic_output_model).mean()
-
-        # Backprop the loss. Gogogo!
-        loss = critic_loss+model_loss
+        # we want to maximize loss
+        critic_loss = -1*(critic_output_target-critic_output_model).mean()
+        model_loss = -1*critic_output_model.mean()
 
         # Log some stuff
         if i % 10 == 0:
-            run.log({"model_loss": model_loss.item(),
-                    "critic_loss": critic_loss.item(),
-                    "loss": loss.item(),
-                    "sample": wandb.Html(logits_string[0])})
+            try: 
+                run.log({"model_loss": model_loss.item(),
+                        "critic_loss": critic_loss.item(),
+                        "sample": wandb.Html(logits_string[0])})
+            except IsADirectoryError:
+                pass
 
-        loss.backward()
+        bar.set_description(f"model loss: {round(model_loss.item(),5)}, critic loss: {round(critic_loss.item(),5)}")
+
+        # Freeze critic model to backprop model
+        for param in critic_model.parameters():
+            param.requires_grad = False
+        model_loss.backward(retain_graph=True)
+
+        # Unreeze critic model to backprop model
+        for param in critic_model.parameters():
+            param.requires_grad = True
+        # Freeze bart model to backprop critic
+        for param in bart_model.parameters():
+            param.requires_grad = False
+        critic_loss.backward()
 
         actor_optim.step()
         critic_optim.step()
 
         actor_optim.zero_grad()
         critic_optim.zero_grad()
+
