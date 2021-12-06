@@ -23,7 +23,7 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 5e-5, 
+    actor_lr = 1e-5, 
     critic_lr = 1e-6,
     max_length = 50,
     epochs = 100,
@@ -85,7 +85,7 @@ class Critic(nn.Module):
         x = F.relu(self.d3(x))
         x = F.relu(self.d4(x))
         x = F.relu(self.d5(x))
-        x = self.d6(x)
+        x = F.tanh(self.d6(x))
         return x
 
 critic_model = Critic(len(bart_tokenizer))
