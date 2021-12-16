@@ -6,6 +6,7 @@ from transformers import AdamW
 
 import torch
 import torch.nn as nn
+from torch.optim import SGD
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
@@ -23,12 +24,14 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 1e-5, 
+    actor_lr = 5e-5, 
     critic_lr = 1e-6,
     max_length = 50,
     epochs = 100,
     train_split = 0.99,
     batch_size = 4,
+    accumulate = 50,
+    noise_mix = 0.1
 )
 
 run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
@@ -44,6 +47,8 @@ MAX_LENGTH = config.max_length
 TRAIN_SPLIT = config.train_split
 BATCH_SIZE = config.batch_size
 EPOCHS = config.epochs
+ACCUMULATE = config.accumulate
+NOISE = config.noise_mix
 
 print("Getting data.")
 with open("./data_parsed.json", "r") as df:
@@ -79,13 +84,13 @@ class Critic(nn.Module):
         self.d6 = nn.Linear(32, 1)
 
     def forward(self,x):
-        x = F.relu(self.d1(x))
-        x = F.relu(self.d2(x))
+        x = F.leaky_relu(self.d1(x))
+        x = F.leaky_relu(self.d2(x))
         x = self.flatten(x)
-        x = F.relu(self.d3(x))
-        x = F.relu(self.d4(x))
-        x = F.relu(self.d5(x))
-        x = F.tanh(self.d6(x))
+        x = F.leaky_relu(self.d3(x))
+        x = F.leaky_relu(self.d4(x))
+        x = F.leaky_relu(self.d5(x))
+        x = self.d6(x)
         return x
 
 critic_model = Critic(len(bart_tokenizer))
@@ -97,7 +102,9 @@ actor_optim = AdamW(bart_model.parameters(), lr=ACTOR_LR)
 
 critic_model.to(DEVICE)
 critic_model.train()
-critic_optim = AdamW(critic_model.parameters(), lr=CRITIC_LR)
+critic_optim = SGD(critic_model.parameters(), lr=CRITIC_LR)
+
+run.watch([bart_model, critic_model])
 
 print("Starting to train.")
 max_token = len(bart_tokenizer)-1
@@ -173,9 +180,10 @@ for ep in range(EPOCHS):
             param.requires_grad = False
         critic_loss.backward()
 
-        actor_optim.step()
-        critic_optim.step()
+        if i % ACCUMULATE == 0:
+            actor_optim.step()
+            critic_optim.step()
 
-        actor_optim.zero_grad()
-        critic_optim.zero_grad()
+            actor_optim.zero_grad()
+            critic_optim.zero_grad()
 
