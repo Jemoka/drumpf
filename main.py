@@ -5,6 +5,8 @@ from transformers import BartConfig, BartTokenizer, BartForConditionalGeneration
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 from nltk import word_tokenize
 
+from nltk.corpus import brown
+
 from sentence_transformers import SentenceTransformer, util
 
 import torch
@@ -34,8 +36,8 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 1e-5, 
-    critic_lr = 1e-5,
+    actor_lr = 5e-5, 
+    critic_lr = 1e-3,
     max_length = 50,
     epochs = 10000,
     train_split = 0.99,
@@ -48,6 +50,10 @@ run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaul
 config = wandb.config
 
 np2tens = lambda x: torch.tensor(x)
+def find(tensor, value, axis=0):
+    x = tensor==2
+    nonz = (x > 0)
+    return ((nonz.cumsum(axis) == 1) & nonz).max(axis).indices
 
 print("Setting up constants.")
 ACTOR_LR = config.actor_lr
@@ -60,11 +66,15 @@ ACCUMULATE = config.descriminator_accumulate
 
 print("Getting data.")
 with open("./data_parsed.json", "r") as df:
-    data_raw = json.load(df)
+    data_drumpf = json.load(df)
+
+print("Setting up detokenizer.")
+detokenizer = TreebankWordDetokenizer()
+data_brown = [detokenizer.detokenize(i) for i in brown.sents()]
+data_raw = data_drumpf + data_brown
+random.shuffle(data_raw)
 
 print("Setting up reward.")
-detokenizer = TreebankWordDetokenizer()
-dataset_sents = [detokenizer.detokenize(i) for i in data_raw]
 dataset_words = [j.lower() for i in data_raw for j in word_tokenize(i)]
 usage = defaultdict(int)
 
@@ -125,9 +135,9 @@ class Critic(nn.Module):
 
         self.output = nn.Linear(512, 1)
 
-    def forward(self,x):
+    def forward(self,x,mask):
         x = self.process(x)
-        encoded = self.encoder(x.transpose(0,1))
+        encoded = self.encoder(x.transpose(0,1), src_key_padding_mask=mask)
         x = self.output(encoded)
         return encoded
 
@@ -136,17 +146,52 @@ critic_model = Critic(len(bart_tokenizer))
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
 bart_model.train()
-actor_optim = RMSprop(bart_model.parameters(), lr=ACTOR_LR)
+actor_optim = Adam(bart_model.parameters(), lr=ACTOR_LR)
 
 critic_model.to(DEVICE)
 critic_model.train()
-critic_optim = RMSprop(critic_model.parameters(), lr=CRITIC_LR)
+critic_optim = Adam(critic_model.parameters(), lr=CRITIC_LR)
 
 run.watch([bart_model, critic_model])
 
-print("Starting to train.")
+print("Starting to pre-train critic.")
 max_token = len(bart_tokenizer)-1
 
+for ep in range(2):
+    print(f"Training epoch {ep}")
+
+    bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
+    for i, batch in bar:
+        # Encode each input sentence 
+        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
+        # Pad the encoded result to the MAX_LENGTH
+        input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+        # Mask the attention such that only non-padded values are available
+        input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+
+        # one-hot encode the inputs to the model
+        input_sentences_one_hot = torch.nn.functional.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
+        # Pass these sentences through the model
+        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)
+        # Calculate the relative rewards
+        critic_targets = np2tens([[reward(i)] for i in batch]).to(DEVICE)
+
+        # First, backprop critics' loss
+        critic_loss = ((critic_targets-critic_output_targets)**2).mean()
+        critic_loss.backward()
+        actor_optim.zero_grad()
+        critic_optim.step() # train the critic wayy more than the actor
+        critic_optim.zero_grad()
+
+        # Log some stuff
+        if i % 10 == 0:
+            try: 
+                run.log({"critic_loss": critic_loss.item(),
+                         "reward": critic_targets[0].item()})
+            except IsADirectoryError:
+                pass
+
+print("Starting to train model.")
 for ep in range(EPOCHS):
     print(f"Training epoch {ep}")
 
@@ -166,46 +211,38 @@ for ep in range(EPOCHS):
         actions = torch.stack([torch.argmax(i, axis=1) for i in model_sentences_padded_expanded.detach()])
         # Stringify the outputs
         logits_string = [bart_tokenizer.decode(i) for i in actions]
+        # Find the </s> tokens
+        eos_token_pos = find(actions, 2, 1)
+        # Find out the masked attention values
+        output_sentence_mask = np2tens([[1 for _ in range(i)] + [0 for _ in range(MAX_LENGTH-i)] for i in eos_token_pos]).to(DEVICE)
         # Return the final string
         logits_string = [re.sub("<s>", "", i.split("</s>")[0]) for i in logits_string]
 
         # Calculate critic outputs
-        critic_output_model = critic_model(model_sentences_padded_expanded)
+        critic_output_model = critic_model(model_sentences_padded_expanded, mask=output_sentence_mask)
 
         # Calculate the relative rewards
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
         # First, backprop critics' loss
-        critic_loss = ((critic_targets-critic_output_model)**2).mean()
-        critic_loss.backward(retain_graph=True)
-        actor_optim.zero_grad()
-
-        # Then, backprop the model's loss
         model_loss = -1*(critic_output_model.mean())
         model_loss.backward()
         critic_optim.zero_grad()
-
-        # Zero the dangling critic loss
-        critic_optim.step()
-        if i % ACCUMULATE == 0:
-            actor_optim.step() # train the critic wayy more than the actor
+        actor_optim.step()
 
         critic_optim.zero_grad()
         actor_optim.zero_grad()
-
-        # Clip the weights
-        for p in critic_model.parameters():
-            p.data.clamp_(-0.01, 0.01)
 
         # Log some stuff
         if i % 10 == 0:
             try: 
                 run.log({"model_loss": model_loss.item(),
-                            "critic_loss": critic_loss.item(),
-                            "reward": critic_targets[0].item(),
-                            "sample": wandb.Html(logits_string[0])})
+                         # "critic_loss": critic_loss.item(),
+                         "reward": critic_targets[0].item(),
+                         "sample": wandb.Html(logits_string[0])})
             except IsADirectoryError:
                 pass
 
         # Set model parametres
-        bar.set_description(f"model loss: {round(model_loss.item(),5)}, critic loss: {round(critic_loss.item(),5)}")
+        # bar.set_description(f"model loss: {round(model_loss.item(),5)}, critic loss: {round(critic_loss.item(),5)}")
+        bar.set_description(f"model loss: {round(model_loss.item(),5)}")
