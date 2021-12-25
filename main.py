@@ -2,6 +2,7 @@ from nltk.tokenize import word_tokenize
 from collections import defaultdict
 
 from transformers import BartConfig, BartTokenizer, BartForConditionalGeneration
+from transformers import BertConfig, BertForSequenceClassification
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 from nltk import word_tokenize
 
@@ -37,7 +38,7 @@ DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cp
 
 hyperparametre_defaults = dict(
     actor_lr = 5e-5, 
-    critic_lr = 1e-3,
+    critic_lr = 1e-4,
     max_length = 50,
     epochs = 10000,
     train_split = 0.99,
@@ -105,7 +106,12 @@ def reward(src):
     except ZeroDivisionError:
         usage_src = 0
 
-    return np.tanh(usage_src)
+    raw_reward = (usage_src-0.4)/0.6
+    if raw_reward > 1:
+        raw_reward = 1
+    elif raw_reward < 0:
+        raw_reward = 0
+    return raw_reward
 
 print("Setting up dataset.")
 data_train = data_raw[:int(TRAIN_SPLIT*len(data_raw))]
@@ -129,17 +135,16 @@ class Critic(nn.Module):
     def __init__(self, vocab_size):
         super(Critic,self).__init__()
 
-        self.process = nn.Linear(vocab_size, 512)
-        encoderLayer = nn.TransformerEncoderLayer(512, 8)
-        self.encoder = nn.TransformerEncoder(encoderLayer, 4)
+        self.bert_config = BertConfig.from_pretrained("bert-base-cased")
+        self.bert_config.num_labels = 1
 
-        self.output = nn.Linear(512, 1)
+        self.d1 = nn.Linear(vocab_size, self.bert_config.hidden_size)
+        self.model = BertForSequenceClassification(self.bert_config)
 
     def forward(self,x,mask):
-        x = self.process(x)
-        encoded = self.encoder(x.transpose(0,1), src_key_padding_mask=mask)
-        x = self.output(encoded)
-        return encoded
+        x = self.d1(x)
+        x = self.model(inputs_embeds=x)
+        return x.logits
 
 critic_model = Critic(len(bart_tokenizer))
 
@@ -157,7 +162,7 @@ run.watch([bart_model, critic_model])
 print("Starting to pre-train critic.")
 max_token = len(bart_tokenizer)-1
 
-for ep in range(2):
+for ep in range(4):
     print(f"Training epoch {ep}")
 
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
@@ -190,6 +195,24 @@ for ep in range(2):
                          "reward": critic_targets[0].item()})
             except IsADirectoryError:
                 pass
+
+def predict_on_batch(batch):
+        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
+        # Pad the encoded result to the MAX_LENGTH
+        input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+        # Mask the attention such that only non-padded values are available
+        input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+
+        # one-hot encode the inputs to the model
+        input_sentences_one_hot = torch.nn.functional.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
+        # Pass these sentences through the model
+        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)
+        print(critic_output_targets)
+
+while True:
+    a = input("")
+    predict_on_batch([a])
+
 
 print("Starting to train model.")
 for ep in range(EPOCHS):
