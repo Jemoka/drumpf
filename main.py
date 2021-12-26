@@ -37,13 +37,16 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 5e-5, 
-    critic_lr = 1e-4,
+    actor_lr = 3e-6, 
+    critic_lr = 5e-5,
     max_length = 50,
     epochs = 10000,
     train_split = 0.99,
-    batch_size = 28,
-    descriminator_accumulate = 16
+    batch_size = 8,
+    # batch_size = 28,
+    descriminator_accumulate = 16,
+    actor_model = None,
+    critic_model = "eternal-grass-98"
 )
 
 run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
@@ -64,6 +67,8 @@ TRAIN_SPLIT = config.train_split
 BATCH_SIZE = config.batch_size
 EPOCHS = config.epochs
 ACCUMULATE = config.descriminator_accumulate
+ACTOR = config.actor_model
+CRITIC = config.critic_model
 
 print("Getting data.")
 with open("./data_parsed.json", "r") as df:
@@ -146,7 +151,14 @@ class Critic(nn.Module):
         x = self.model(inputs_embeds=x)
         return x.logits
 
-critic_model = Critic(len(bart_tokenizer))
+
+pretrain = 1
+critic_model = None
+if CRITIC:
+    pretrain = 0
+    critic_model = torch.load(f"./models/critic/{CRITIC}")
+else:
+    critic_model = Critic(len(bart_tokenizer))
 
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
@@ -162,7 +174,7 @@ run.watch([bart_model, critic_model])
 print("Starting to pre-train critic.")
 max_token = len(bart_tokenizer)-1
 
-for ep in range(4):
+for ep in range(pretrain):
     print(f"Training epoch {ep}")
 
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
@@ -196,6 +208,10 @@ for ep in range(4):
             except IsADirectoryError:
                 pass
 
+if not CRITIC:
+    torch.save(critic_model, f"./models/critic/{run.name}")
+
+
 def predict_on_batch(batch):
         input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
         # Pad the encoded result to the MAX_LENGTH
@@ -208,11 +224,11 @@ def predict_on_batch(batch):
         # Pass these sentences through the model
         critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)
         print(critic_output_targets)
+        print([reward(i) for i in batch])
 
-while True:
-    a = input("")
-    predict_on_batch([a])
-
+# while True:
+    # a = input("")
+    # predict_on_batch([a])
 
 print("Starting to train model.")
 for ep in range(EPOCHS):
@@ -242,13 +258,13 @@ for ep in range(EPOCHS):
         logits_string = [re.sub("<s>", "", i.split("</s>")[0]) for i in logits_string]
 
         # Calculate critic outputs
-        critic_output_model = critic_model(model_sentences_padded_expanded, mask=output_sentence_mask)
+        critic_output_model = critic_model(torch.softmax(model_sentences_padded_expanded, dim=2), mask=output_sentence_mask)
 
         # Calculate the relative rewards
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
         # First, backprop critics' loss
-        model_loss = -1*(critic_output_model.mean())
+        model_loss = 1-(critic_output_model.mean())
         model_loss.backward()
         critic_optim.zero_grad()
         actor_optim.step()
@@ -269,3 +285,6 @@ for ep in range(EPOCHS):
         # Set model parametres
         # bar.set_description(f"model loss: {round(model_loss.item(),5)}, critic loss: {round(critic_loss.item(),5)}")
         bar.set_description(f"model loss: {round(model_loss.item(),5)}")
+
+torch.save(bart_model, f"./models/actor/{run.name}")
+
