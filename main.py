@@ -53,11 +53,17 @@ run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaul
 # run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
 config = wandb.config
 
+# A few random utility function
 np2tens = lambda x: torch.tensor(x)
+
 def find(tensor, value, axis=0):
     x = tensor==2
     nonz = (x > 0)
     return ((nonz.cumsum(axis) == 1) & nonz).max(axis).indices
+
+def semantic_similarity(a,b,model):
+    a,b = model.encode([a,b])
+    return util.pytorch_cos_sim(a,b)[0][0].item()
 
 print("Setting up constants.")
 ACTOR_LR = config.actor_lr
@@ -169,6 +175,8 @@ critic_model.to(DEVICE)
 critic_model.train()
 critic_optim = Adam(critic_model.parameters(), lr=CRITIC_LR)
 
+similarity_model = SentenceTransformer('stsb-bert-base', device=DEVICE)
+
 run.watch([bart_model, critic_model])
 
 print("Starting to pre-train critic.")
@@ -256,15 +264,25 @@ for ep in range(EPOCHS):
         output_sentence_mask = np2tens([[1 for _ in range(i)] + [0 for _ in range(MAX_LENGTH-i)] for i in eos_token_pos]).to(DEVICE)
         # Return the final string
         logits_string = [re.sub("<s>", "", i.split("</s>")[0]) for i in logits_string]
+        # Return the logits probabilites
+        logits_probs = torch.softmax(model_sentences_padded_expanded, dim=2)
+
+        # Calculate the similarity scores
+        similarity_scores = [semantic_similarity(a,b,similarity_model) for a,b in zip(logits_string, batch)]
 
         # Calculate critic outputs
-        critic_output_model = critic_model(torch.softmax(model_sentences_padded_expanded, dim=2), mask=output_sentence_mask)
+        critic_output_model = critic_model(logits_probs, mask=output_sentence_mask)
 
         # Calculate the relative rewards
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
-        # First, backprop critics' loss
-        model_loss = 1-(critic_output_model.mean())
+        # Calculate both loss
+        model_loss_critic = (1-(critic_output_model.mean()))*0.5
+        model_loss_similarity = (torch.stack([-1*a*l.log() for a,l in zip(similarity_scores,logits_probs)]).mean())*0.5
+
+        # Calculate group los
+        model_loss = model_loss_critic + model_loss_similarity
+
         model_loss.backward()
         critic_optim.zero_grad()
         actor_optim.step()
@@ -277,6 +295,9 @@ for ep in range(EPOCHS):
             try: 
                 run.log({"model_loss": model_loss.item(),
                          # "critic_loss": critic_loss.item(),
+                         "model_loss_critic": model_loss_critic.item(),
+                         "model_loss_similarity": model_loss_similarity.item(),
+                         "model_loss": model_loss.item(),
                          "reward": critic_targets[0].item(),
                          "sample": wandb.Html(logits_string[0])})
             except IsADirectoryError:
