@@ -298,11 +298,11 @@ for ep in range(EPOCHS):
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
         # Calculate both losses
-        model_loss_critic = (1-(critic_output_model.mean()))*0.5
+        model_loss_critic = (1-(critic_output_model.mean()))
         model_loss_similarity = torch.stack([torch.stack([i*j for i,j in zip(a,s)]) for a, s in zip(action_log_logits, model_similarity_scores)]).mean()*50 # scaling factor to balance errors
 
         # Calculate group los
-        model_loss = model_loss_critic + model_loss_similarity
+        model_loss = (model_loss_critic + model_loss_similarity)/2
 
         model_loss.backward()
         critic_optim.zero_grad()
