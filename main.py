@@ -38,7 +38,7 @@ print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 3e-6, 
+    actor_lr = 1e-6, 
     critic_lr = 5e-5,
     max_length = 50,
     epochs = 10000,
@@ -298,7 +298,7 @@ for ep in range(EPOCHS):
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
         # Calculate both losses
-        model_loss_critic = (1-(critic_output_model.mean()))
+        model_loss_critic = (1-(critic_output_model.mean()))*0.5
         model_loss_similarity = torch.stack([torch.stack([i*j for i,j in zip(a,s)]) for a, s in zip(action_log_logits, model_similarity_scores)]).mean()*50 # scaling factor to balance errors
 
         # Calculate group los
@@ -320,7 +320,7 @@ for ep in range(EPOCHS):
                          "model_loss_similarity": model_loss_similarity.item(),
                          "model_loss": model_loss.item(),
                          "reward": critic_targets[0].item(),
-                         "sample": wandb.Html(logits_string[0])})
+                         "sample": wandb.Html(batch[0]+"<br />"+logits_string[0])})
             except IsADirectoryError:
                 pass
 
