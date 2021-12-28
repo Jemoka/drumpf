@@ -3,6 +3,7 @@ from collections import defaultdict
 
 from transformers import BartConfig, BartTokenizer, BartForConditionalGeneration
 from transformers import BertConfig, BertForSequenceClassification
+from transformers import BertTokenizer, BertModel
 from nltk.tokenize.treebank import TreebankWordDetokenizer
 from nltk import word_tokenize
 
@@ -166,6 +167,12 @@ if CRITIC:
 else:
     critic_model = Critic(len(bart_tokenizer))
 
+print("Establishing similarity model and its tokenizer.")
+similarity_model = BertModel.from_pretrained('sentence-transformers/stsb-bert-base')
+similarity_tokenizer = BertTokenizer.from_pretrained('sentence-transformers/stsb-bert-base')
+for param in similarity_model.parameters():
+    param.requires_grad = False # freeze similarilty model weight
+
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
 bart_model.train()
@@ -175,7 +182,8 @@ critic_model.to(DEVICE)
 critic_model.train()
 critic_optim = Adam(critic_model.parameters(), lr=CRITIC_LR)
 
-similarity_model = SentenceTransformer('stsb-bert-base', device=DEVICE)
+similarity_model.to(DEVICE)
+similarity_model.train()
 
 run.watch([bart_model, critic_model])
 
@@ -244,6 +252,10 @@ for ep in range(EPOCHS):
 
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
     for i, batch in bar:
+        # Calculate the inputs embeddings
+        tokenized_inputs = similarity_tokenizer(batch, return_tensors="pt", truncation=True, padding='max_length', max_length=50).to(DEVICE)
+        encoded_inputs = similarity_model(**tokenized_inputs).last_hidden_state.mean(dim=2)
+
         # Encode each input sentence 
         input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
         # Pad the encoded result to the MAX_LENGTH
@@ -252,7 +264,8 @@ for ep in range(EPOCHS):
         input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
 
         # Pass these sentences through the model
-        model_sentences_padded_expanded = bart_model(input_sentence_padded, attention_mask=input_sentence_mask)["logits"]
+        model_outputs = bart_model(input_sentence_padded, attention_mask=input_sentence_mask, output_hidden_states=True)
+        model_sentences_padded_expanded = model_outputs["logits"]
 
         # Select for the predicted outputs
         actions = torch.stack([torch.argmax(i, axis=1) for i in model_sentences_padded_expanded.detach()])
@@ -266,9 +279,17 @@ for ep in range(EPOCHS):
         logits_string = [re.sub("<s>", "", i.split("</s>")[0]) for i in logits_string]
         # Return the logits probabilites
         logits_probs = torch.softmax(model_sentences_padded_expanded, dim=2)
+        # Gather the logits values of the selected actions
+        action_logits = model_sentences_padded_expanded.gather(2, torch.unsqueeze(actions, 2))
+        # Take the log of it
+        action_log_logits = torch.abs(action_logits).log()
 
-        # Calculate the similarity scores
-        similarity_scores = [semantic_similarity(a,b,similarity_model) for a,b in zip(logits_string, batch)]
+        # Calculate the outputs embeddings
+        tokenized_outputs = similarity_tokenizer(logits_string, return_tensors="pt", truncation=True, padding='max_length', max_length=50).to(DEVICE)
+        encoded_outputs = similarity_model(**tokenized_outputs).last_hidden_state.mean(dim=2)
+
+        # Then, subtract the two and calculate similarity scores
+        model_similarity_scores = torch.abs(encoded_inputs - encoded_outputs)
 
         # Calculate critic outputs
         critic_output_model = critic_model(logits_probs, mask=output_sentence_mask)
@@ -276,9 +297,9 @@ for ep in range(EPOCHS):
         # Calculate the relative rewards
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
-        # Calculate both loss
+        # Calculate both losses
         model_loss_critic = (1-(critic_output_model.mean()))*0.5
-        model_loss_similarity = (torch.stack([-1*a*l.log() for a,l in zip(similarity_scores,logits_probs)]).mean())*0.5
+        model_loss_similarity = torch.stack([torch.stack([i*j for i,j in zip(a,s)]) for a, s in zip(action_log_logits, model_similarity_scores)]).mean()*50 # scaling factor to balance errors
 
         # Calculate group los
         model_loss = model_loss_critic + model_loss_similarity
