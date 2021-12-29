@@ -46,14 +46,14 @@ hyperparametre_defaults = dict(
     epochs = 10000,
     train_split = 0.99,
     # batch_size = 8,
-    batch_size = 20,
+    batch_size = 24,
     actor_model = None,
     critic_model = None
     # critic_model = None
 )
 
-run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
-# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
+# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
+run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
 config = wandb.config
 
 # A few random utility function
@@ -84,7 +84,7 @@ CRITIC = config.critic_model
 print("Getting data.")
 data_text = []
 data_score = []
-with open("./data/coordinance.csv", "r") as df:
+with open("./data/coordinance.json", "r") as df:
     dump = json.load(df)
 
 for i in dump:
@@ -174,13 +174,16 @@ class Critic(nn.Module):
         x = self.model(inputs_embeds=x, attention_mask=mask)
         return x
 
-pretrain = 10
+pretrain = 3 
 critic_model = None
 if CRITIC:
     pretrain = 0
     critic_model = torch.load(f"./models/critic/{CRITIC}")
 else:
-    critic_model = Critic(len(bart_tokenizer))
+    bert_config = BertConfig.from_pretrained("bert-base-cased")
+    bert_config.num_labels = 3
+    critic_model = BertForSequenceClassification(bert_config)
+    critic_tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
 
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
@@ -196,30 +199,30 @@ run.watch([bart_model, critic_model])
 print("Starting to pre-train critic.")
 max_token = len(bart_tokenizer)-1
 
-
-loss = nn.CrossEntropyLoss()
 for ep in range(pretrain):
     print(f"Training epoch {ep}")
-
+    random.shuffle(data_train_batches)
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
     for i, batch in bar:
         batch_texts, batch_scores = zip(*batch)
-        # Encode each input sentence 
-        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch_texts]
-        # Pad the encoded result to the MAX_LENGTH
-        input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
-        # Mask the attention such that only non-padded values are available
-        input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+#         # Encode each input sentence 
+        # input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch_texts]
+        # # Pad the encoded result to the MAX_LENGTH
+        # input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+        # # Mask the attention such that only non-padded values are available
+        # input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
 
         # one-hot encode the inputs to the model
-        input_sentences_one_hot = F.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
+        # input_sentences_one_hot = F.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
         # Calculate the relative rewards
-        critic_targets = F.one_hot(np2tens(batch_scores), num_classes=3).to(DEVICE)
+        # critic_targets = F.one_hot(np2tens(batch_scores), num_classes=3).to(DEVICE)
         # Pass these sentences through the model
-        critic_outputs = critic_model(input_sentences_one_hot, input_sentence_mask)
+        tokenized =  critic_tokenizer(batch_texts, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt").to(DEVICE)
+        labels = np2tens(batch_scores).to(DEVICE)
+        critic_outputs = critic_model(**tokenized, labels=labels)
 
         # First, backprop critics' loss
-        critic_loss = loss(critic_outputs["logits"].softmax(dim=1), critic_targets.float())
+        critic_loss = critic_outputs["loss"]
         critic_loss.backward()
         actor_optim.zero_grad()
         critic_optim.step() # train the critic wayy more than the actor
@@ -237,17 +240,11 @@ if not CRITIC:
 
 
 def predict_on_batch(batch):
-        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
-        # Pad the encoded result to the MAX_LENGTH
-        input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
-        # Mask the attention such that only non-padded values are available
-        input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
+        # Tokenize and see
+        tokenized =  critic_tokenizer(batch, padding="max_length", truncation=True, max_length=MAX_LENGTH, return_tensors="pt").to(DEVICE)
+        critic_outputs = critic_model(**tokenized)
 
-        # one-hot encode the inputs to the model
-        input_sentences_one_hot = torch.nn.functional.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
-        # Pass these sentences through the model
-        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)["logits"]
-        print(critic_output_targets)
+        print(critic_outputs)
 
 while True:
     a = input("")
