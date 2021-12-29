@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer, util
 import torch
 import torch.nn as nn
 
-from torch.nn import TransformerEncoder, TransformerEncoderLayer, Embedding
+from torch.nn import TransformerEncoder, TransformerEncoderLayer, Embedding, CrossEntropyLoss
 from torch.optim import Adam
 import torch.nn.functional as F
 from torch.distributions import Categorical
@@ -32,22 +32,24 @@ import re
 import wandb
 import json
 
+import csv
+
 torch.autograd.set_detect_anomaly(True)
 
 print("Welp I am too tired to do anything so here goes nothing.")
 DEVICE = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
 
 hyperparametre_defaults = dict(
-    actor_lr = 1e-6, 
-    critic_lr = 5e-5,
-    max_length = 50,
+    actor_lr = 1e-5, 
+    critic_lr = 1e-5,
+    max_length = 100,
     epochs = 10000,
     train_split = 0.99,
-    batch_size = 8,
-    # batch_size = 28,
-    descriminator_accumulate = 16,
+    # batch_size = 8,
+    batch_size = 20,
     actor_model = None,
-    critic_model = "eternal-grass-98"
+    critic_model = None
+    # critic_model = None
 )
 
 run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
@@ -66,6 +68,9 @@ def semantic_similarity(a,b,model):
     a,b = model.encode([a,b])
     return util.pytorch_cos_sim(a,b)[0][0].item()
 
+def sigmoid(x):
+  return 1 / (1 + math.exp(-x))
+
 print("Setting up constants.")
 ACTOR_LR = config.actor_lr
 CRITIC_LR = config.critic_lr
@@ -73,57 +78,68 @@ MAX_LENGTH = config.max_length
 TRAIN_SPLIT = config.train_split
 BATCH_SIZE = config.batch_size
 EPOCHS = config.epochs
-ACCUMULATE = config.descriminator_accumulate
 ACTOR = config.actor_model
 CRITIC = config.critic_model
 
 print("Getting data.")
-with open("./data_parsed.json", "r") as df:
-    data_drumpf = json.load(df)
+data_text = []
+data_score = []
+with open("./data/coordinance.csv", "r") as df:
+    dump = json.load(df)
 
-print("Setting up detokenizer.")
-detokenizer = TreebankWordDetokenizer()
-data_brown = [detokenizer.detokenize(i) for i in brown.sents()]
-data_raw = data_drumpf + data_brown
+for i in dump:
+    for j in i:
+        data_text = data_text + j
+        data_score = data_score + [0,1,2]
+                                # 0 - beginner
+                                # 1 - intermediate
+                                # 2 - advanced
+
+
+data_raw = list(zip(data_text, data_score))
+
+# print("Setting up detokenizer.")
+# c = list(zip(data_text, data_score))
 random.shuffle(data_raw)
+# data_text, data_score = zip(*c)
 
-print("Setting up reward.")
-dataset_words = [j.lower() for i in data_raw for j in word_tokenize(i)]
-usage = defaultdict(int)
+# print("Setting up reward.")
+# dataset_words = [j.lower() for i in data_raw for j in word_tokenize(i)]
+# usage = defaultdict(int)
 
-# We count the usage of each word
-for word in dataset_words:
-    usage[word] += 1
+# # We count the usage of each word
+# for word in dataset_words:
+#     usage[word] += 1
 
-# We get the mean and stddev usage and normalize the
-# usages by them
-usage_mean = statistics.mean(usage.values())
-usage_stddev = statistics.stdev(usage.values())
+# # We get the mean and stddev usage and normalize the
+# # usages by them
+# usage_mean = statistics.mean(usage.values())
+# usage_stddev = statistics.stdev(usage.values())
 
-# Finally, we normalize every value based on this
-# difference. We encourage results to be higher
-# than mean so we don't abs value. Also we will
-# take the sigmoid of the output to normalize it
-# between 0 and 1
+# # Finally, we normalize every value based on this
+# # difference. We encourage results to be higher
+# # than mean so we don't abs value. Also we will
+# # take the sigmoid of the output to normalize it
+# # between 0 and 1
 
-for key in usage.keys():
-    usage[key] = np.tanh((usage[key]-usage_mean)/usage_stddev)
+# for key in usage.keys():
+#     usage[key] = np.tanh((usage[key]-usage_mean)/usage_stddev)
 
-# Overall simplification reward
-def reward(src):
-    words_src = [i.lower() for i in word_tokenize(src)]
+# # Overall simplification reward
+# def reward(src):
+#     words_src = [i.lower() for i in word_tokenize(src)]
 
-    try: 
-        usage_src = sum([usage[i] for i in words_src])/len(words_src)
-    except ZeroDivisionError:
-        usage_src = 0
+#     try: 
+#         usage_src = sum([usage[i] for i in words_src])/len(words_src)
+#     except ZeroDivisionError:
+#         usage_src = 0
 
-    raw_reward = (usage_src-0.4)/0.6
-    if raw_reward > 1:
-        raw_reward = 1
-    elif raw_reward < 0:
-        raw_reward = 0
-    return raw_reward
+#     raw_reward = (usage_src-0.4)/0.6
+#     if raw_reward > 1:
+#         raw_reward = 1
+#     elif raw_reward < 0:
+#         raw_reward = 0
+#     return raw_reward
 
 print("Setting up dataset.")
 data_train = data_raw[:int(TRAIN_SPLIT*len(data_raw))]
@@ -148,30 +164,23 @@ class Critic(nn.Module):
         super(Critic,self).__init__()
 
         self.bert_config = BertConfig.from_pretrained("bert-base-cased")
-        self.bert_config.num_labels = 1
+        self.bert_config.num_labels = 3
 
         self.d1 = nn.Linear(vocab_size, self.bert_config.hidden_size)
         self.model = BertForSequenceClassification(self.bert_config)
 
     def forward(self,x,mask):
-        x = self.d1(x)
-        x = self.model(inputs_embeds=x)
-        return x.logits
+        x = F.relu(self.d1(x))
+        x = self.model(inputs_embeds=x, attention_mask=mask)
+        return x
 
-
-pretrain = 1
+pretrain = 10
 critic_model = None
 if CRITIC:
     pretrain = 0
     critic_model = torch.load(f"./models/critic/{CRITIC}")
 else:
     critic_model = Critic(len(bart_tokenizer))
-
-print("Establishing similarity model and its tokenizer.")
-similarity_model = BertModel.from_pretrained('sentence-transformers/stsb-bert-base')
-similarity_tokenizer = BertTokenizer.from_pretrained('sentence-transformers/stsb-bert-base')
-for param in similarity_model.parameters():
-    param.requires_grad = False # freeze similarilty model weight
 
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
@@ -182,47 +191,46 @@ critic_model.to(DEVICE)
 critic_model.train()
 critic_optim = Adam(critic_model.parameters(), lr=CRITIC_LR)
 
-similarity_model.to(DEVICE)
-similarity_model.train()
-
 run.watch([bart_model, critic_model])
 
 print("Starting to pre-train critic.")
 max_token = len(bart_tokenizer)-1
 
+
+loss = nn.CrossEntropyLoss()
 for ep in range(pretrain):
     print(f"Training epoch {ep}")
 
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
     for i, batch in bar:
+        batch_texts, batch_scores = zip(*batch)
         # Encode each input sentence 
-        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
+        input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch_texts]
         # Pad the encoded result to the MAX_LENGTH
         input_sentence_padded = np2tens([i + [1 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
         # Mask the attention such that only non-padded values are available
         input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
 
         # one-hot encode the inputs to the model
-        input_sentences_one_hot = torch.nn.functional.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
-        # Pass these sentences through the model
-        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)
+        input_sentences_one_hot = F.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
         # Calculate the relative rewards
-        critic_targets = np2tens([[reward(i)] for i in batch]).to(DEVICE)
+        critic_targets = F.one_hot(np2tens(batch_scores), num_classes=3).to(DEVICE)
+        # Pass these sentences through the model
+        critic_outputs = critic_model(input_sentences_one_hot, input_sentence_mask)
 
         # First, backprop critics' loss
-        critic_loss = ((critic_targets-critic_output_targets)**2).mean()
+        critic_loss = loss(critic_outputs["logits"].softmax(dim=1), critic_targets.float())
         critic_loss.backward()
         actor_optim.zero_grad()
         critic_optim.step() # train the critic wayy more than the actor
         critic_optim.zero_grad()
 
         # Log some stuff
-        if i % 10 == 0:
-            try: 
-                run.log({"critic_loss": critic_loss.item(),
-                         "reward": critic_targets[0].item()})
-            except IsADirectoryError:
-                pass
+        try: 
+            run.log({"critic_loss": critic_loss.item(),
+                    "reward": batch_scores[0]})
+        except IsADirectoryError:
+            pass
 
 if not CRITIC:
     torch.save(critic_model, f"./models/critic/{run.name}")
@@ -238,13 +246,14 @@ def predict_on_batch(batch):
         # one-hot encode the inputs to the model
         input_sentences_one_hot = torch.nn.functional.one_hot(input_sentence_padded, num_classes=max_token+1).to(DEVICE).float()
         # Pass these sentences through the model
-        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)
+        critic_output_targets = critic_model(input_sentences_one_hot, input_sentence_mask)["logits"]
         print(critic_output_targets)
-        print([reward(i) for i in batch])
 
-# while True:
-    # a = input("")
-    # predict_on_batch([a])
+while True:
+    a = input("")
+    predict_on_batch([a])
+
+# Initialize a loss function
 
 print("Starting to train model.")
 for ep in range(EPOCHS):
@@ -252,10 +261,6 @@ for ep in range(EPOCHS):
 
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
     for i, batch in bar:
-        # Calculate the inputs embeddings
-        tokenized_inputs = similarity_tokenizer(batch, return_tensors="pt", truncation=True, padding='max_length', max_length=50).to(DEVICE)
-        encoded_inputs = similarity_model(**tokenized_inputs).last_hidden_state.mean(dim=2)
-
         # Encode each input sentence 
         input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch]
         # Pad the encoded result to the MAX_LENGTH
@@ -263,7 +268,7 @@ for ep in range(EPOCHS):
         # Mask the attention such that only non-padded values are available
         input_sentence_mask = np2tens([[1 for _ in range(len(i))] + [0 for _ in range(MAX_LENGTH-len(i))] for i in input_sentence_encoded]).to(DEVICE)
 
-        # Pass these sentences through the model
+        # Pass these sentences through the model, calculate the topic modeling loss
         model_outputs = bart_model(input_sentence_padded, attention_mask=input_sentence_mask, output_hidden_states=True)
         model_sentences_padded_expanded = model_outputs["logits"]
 
@@ -282,14 +287,7 @@ for ep in range(EPOCHS):
         # Gather the logits values of the selected actions
         action_logits = model_sentences_padded_expanded.gather(2, torch.unsqueeze(actions, 2))
         # Take the log of it
-        action_log_logits = torch.abs(action_logits).log()
-
-        # Calculate the outputs embeddings
-        tokenized_outputs = similarity_tokenizer(logits_string, return_tensors="pt", truncation=True, padding='max_length', max_length=50).to(DEVICE)
-        encoded_outputs = similarity_model(**tokenized_outputs).last_hidden_state.mean(dim=2)
-
-        # Then, subtract the two and calculate similarity scores
-        model_similarity_scores = torch.abs(encoded_inputs - encoded_outputs)
+        action_log_logits = torch.abs(action_logits)
 
         # Calculate critic outputs
         critic_output_model = critic_model(logits_probs, mask=output_sentence_mask)
@@ -297,12 +295,13 @@ for ep in range(EPOCHS):
         # Calculate the relative rewards
         critic_targets = np2tens([[reward(i)] for i in logits_string]).to(DEVICE)
 
-        # Calculate both losses
-        model_loss_critic = (1-(critic_output_model.mean()))*0.5
-        model_loss_similarity = torch.stack([torch.stack([i*j for i,j in zip(a,s)]) for a, s in zip(action_log_logits, model_similarity_scores)]).mean()*50 # scaling factor to balance errors
+        # Calculate losses
+        model_loss_critic = (1-(critic_output_model.mean()))*5 # *5 to prevent vanishing gradients
+        model_loss_topicmodeling = maskedCrossEntropy(model_sentences_padded_expanded, 
+                                                      input_sentence_padded)
 
-        # Calculate group los
-        model_loss = (model_loss_critic + model_loss_similarity)/2
+        # Calculate group loss
+        model_loss = (model_loss_critic + model_loss_topicmodeling)
 
         model_loss.backward()
         critic_optim.zero_grad()
@@ -317,7 +316,7 @@ for ep in range(EPOCHS):
                 run.log({"model_loss": model_loss.item(),
                          # "critic_loss": critic_loss.item(),
                          "model_loss_critic": model_loss_critic.item(),
-                         "model_loss_similarity": model_loss_similarity.item(),
+                         "model_loss_topicmodeling": model_loss_topicmodeling.item(),
                          "model_loss": model_loss.item(),
                          "reward": critic_targets[0].item(),
                          "sample": wandb.Html(batch[0]+"<br />"+logits_string[0])})
