@@ -170,28 +170,16 @@ bart_tokenizer = BartTokenizer.from_pretrained("facebook/bart-base")
 bart_model = BartForConditionalGeneration.from_pretrained("facebook/bart-base", config=bart_config)
 
 print("Establishing critic model.")
-class Critic(nn.Module):
-    def __init__(self, vocab_size):
-        super(Critic,self).__init__()
-
-        self.bert_config = BertConfig.from_pretrained("bert-base-cased")
-        self.bert_config.num_labels = 1
-
-        self.d1 = nn.Linear(vocab_size, self.bert_config.hidden_size)
-        self.model = BertForSequenceClassification(self.bert_config)
-
-    def forward(self,x,mask):
-        x = F.relu(self.d1(x))
-        x = self.model(inputs_embeds=x, attention_mask=mask)
-        return x
-
 pretrain = 3 
 critic_model = None
 if CRITIC:
     pretrain = 0
     critic_model = torch.load(f"./models/critic/{CRITIC}")
 else:
-    critic_model = Critic(len(bart_tokenizer))
+    bert_config = BertConfig.from_pretrained("bert-base-cased")
+    bert_config.num_labels = 1
+    critic_tokenizer = BertTokenizer.from_pretrained("bert-base-cased")
+    critic_model = BertForSequenceClassification(bert_config)
 
 print("Creating optimizers and moving models.")
 bart_model.to(DEVICE)
@@ -211,16 +199,15 @@ def accuracy(model, batch):
     # seperate in out batch
     batch_in, batch_out = zip(*batch)
 
-    batched_texts_paired = [i[0]+"<s>"+i[1] for i in batch_in]
-    tokenized =  bart_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
+    batched_texts_paired = [i[0]+"[SEP]"+i[1] for i in batch_in]
+    tokenized =  critic_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
 
     # expand and predict
-    input_one_hot = F.one_hot(tokenized["input_ids"], num_classes=max_token+1).to(DEVICE).float()
-    critic_outputs = critic_model(input_one_hot, tokenized["attention_mask"])
+    labels = torch.unsqueeze(np2tens(batch_out), dim=1).to(DEVICE).float()
+    critic_outputs = critic_model(**tokenized, labels=labels)
 
     # First, backprop critics' loss
-    labels = torch.unsqueeze(np2tens(batch_out), dim=1).to(DEVICE).float()
-    critic_loss = ((critic_outputs["logits"]-labels)**2).mean()
+    critic_loss = critic_outputs["loss"]
 
     # compare them!
     return critic_loss.item()
@@ -231,7 +218,8 @@ for ep in range(pretrain):
     random.shuffle(data_train_batches)
     bar = tqdm(enumerate(data_train_batches), total=len(data_train_batches))
     for i, batch in bar:
-        run.log({"critic_val": accuracy(critic_model, random.sample(data_val_batches, 1)[0])})
+        if i%20 == 0:
+            run.log({"critic_val": accuracy(critic_model, random.sample(data_val_batches, 1)[0])})
         batch_texts, batch_scores = zip(*batch)
         #         # Encode each input sentence 
         # input_sentence_encoded = [bart_tokenizer.encode(i)[:MAX_LENGTH] for i in batch_texts]
@@ -245,16 +233,15 @@ for ep in range(pretrain):
         # Calculate the relative rewards
         # critic_targets = F.one_hot(np2tens(batch_scores), num_classes=3).to(DEVICE)
         # Encode input sentences
-        batched_texts_paired = [i[0]+"<s>"+i[1] for i in batch_texts]
-        tokenized =  bart_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
+        batched_texts_paired = [i[0]+"[SEP]"+i[1] for i in batch_texts]
+        tokenized =  critic_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
 
         # expand and predict
-        input_one_hot = F.one_hot(tokenized["input_ids"], num_classes=max_token+1).to(DEVICE).float()
-        critic_outputs = critic_model(input_one_hot, tokenized["attention_mask"])
+        labels = torch.unsqueeze(np2tens(batch_scores), dim=1).to(DEVICE).float()
+        critic_outputs = critic_model(**tokenized, labels=labels)
 
         # First, backprop critics' loss
-        labels = torch.unsqueeze(np2tens(batch_scores), dim=1).to(DEVICE).float()
-        critic_loss = ((critic_outputs["logits"]-labels)**2).mean()
+        critic_loss = critic_outputs["loss"]
 
         critic_loss.backward()
         actor_optim.zero_grad()
@@ -273,12 +260,11 @@ if not CRITIC:
 
 
 def predict_on_batch(batch):
-        batched_texts_paired = [i[0]+"<s>"+i[1] for i in batch]
-        tokenized =  bart_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
+        batched_texts_paired = [i[0]+"[SEP]"+i[1] for i in batch]
+        tokenized =  critic_tokenizer(batched_texts_paired, padding="max_length", truncation=True, max_length=MAX_LENGTH*2, return_tensors="pt").to(DEVICE)
 
         # expand and predict
-        input_one_hot = F.one_hot(tokenized["input_ids"], num_classes=max_token+1).to(DEVICE).float()
-        critic_outputs = critic_model(input_one_hot, tokenized["attention_mask"])
+        critic_outputs = critic_model(**tokenized)
 
         print(critic_outputs["logits"])
 
