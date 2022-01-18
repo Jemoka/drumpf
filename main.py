@@ -52,8 +52,8 @@ hyperparametre_defaults = dict(
     # critic_model = None
 )
 
-run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
-# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
+# run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults)
+run = wandb.init(project="drumpf", entity="jemoka", config=hyperparametre_defaults, mode="disabled")
 config = wandb.config
 
 # A few random utility function
@@ -64,9 +64,11 @@ def find(tensor, value, axis=0):
     nonz = (x > 0)
     return ((nonz.cumsum(axis) == 1) & nonz).max(axis).indices
 
-def semantic_similarity(a,b,model):
-    a,b = model.encode([a,b])
-    return util.pytorch_cos_sim(a,b)[0][0].item()
+# similarity_model = SentenceTransformer('stsb-bert-base')
+# def semantic_similarity(a,b):
+#     global similarity_model
+#     a,b = similarity_model.encode([a,b])
+#     return util.pytorch_cos_sim(a,b)[0][0].item()
 
 def sigmoid(x):
   return 1 / (1 + math.exp(-x))
@@ -82,75 +84,19 @@ ACTOR = config.actor_model
 CRITIC = config.critic_model
 
 print("Getting data.")
-data_text = []
-data_score = []
-with open("./data/comparison.csv", "r") as df:
+
+data_raw = []
+with open("./data/coordinance.csv") as df:
     reader = csv.reader(df)
     next(reader)
-    for row in reader:
-        data_text.append((row[1], row[3]))
-        data_score.append(float(row[-2]))
 
-# slice
-data_text = data_text[2:]
-data_score = data_score[2:]
+    for row in tqdm(reader):
+                        # ah yes good code
+        data_raw.append([eval(row[0]), float(row[1])])
 
+ data_raw = list(zip(data_text, data_score))
 
-# # 
-
-# for i in dump:
-#     for j in i:
-#         data_text = data_text + j
-#         data_score = data_score + [0,1,2]
-#                                 # 0 - beginner
-#                                 # 1 - intermediate
-#                                 # 2 - advanced
-
-
-data_raw = list(zip(data_text, data_score))
-
-# print("Setting up detokenizer.")
-# c = list(zip(data_text, data_score))
 random.shuffle(data_raw)
-# data_text, data_score = zip(*c)
-
-# print("Setting up reward.")
-# dataset_words = [j.lower() for i in data_raw for j in word_tokenize(i)]
-# usage = defaultdict(int)
-
-# # We count the usage of each word
-# for word in dataset_words:
-#     usage[word] += 1
-
-# # We get the mean and stddev usage and normalize the
-# # usages by them
-# usage_mean = statistics.mean(usage.values())
-# usage_stddev = statistics.stdev(usage.values())
-
-# # Finally, we normalize every value based on this
-# # difference. We encourage results to be higher
-# # than mean so we don't abs value. Also we will
-# # take the sigmoid of the output to normalize it
-# # between 0 and 1
-
-# for key in usage.keys():
-#     usage[key] = np.tanh((usage[key]-usage_mean)/usage_stddev)
-
-# # Overall simplification reward
-# def reward(src):
-#     words_src = [i.lower() for i in word_tokenize(src)]
-
-#     try: 
-#         usage_src = sum([usage[i] for i in words_src])/len(words_src)
-#     except ZeroDivisionError:
-#         usage_src = 0
-
-#     raw_reward = (usage_src-0.4)/0.6
-#     if raw_reward > 1:
-#         raw_reward = 1
-#     elif raw_reward < 0:
-#         raw_reward = 0
-#     return raw_reward
 
 print("Setting up dataset.")
 data_train = data_raw[:int(TRAIN_SPLIT*len(data_raw))]
